@@ -444,18 +444,26 @@ export async function buildUniqueFileId(context, fileName, fileType = 'applicati
     // 对上传路径进行安全处理
     const normalizedFolder = sanitizeUploadFolder(uploadFolder);
 
-    // 处理文件名，移除特殊字符
-    fileName = sanitizeFileName(fileName);
+    // 文件夹上传时（有目录结构），默认保持原文件名，避免文件名被重命名为时间戳_文件名
+    // 这样可以保持原始目录结构，方便文件管理和查找
+    const effectiveNameType = normalizedFolder ? 'origin' : nameType;
+
+    // 处理文件名，移除特殊字符（origin模式下仅做基础安全处理，保留原文件名）
+    // origin模式下先提取纯文件名（防止传入的fileName包含路径，如分块上传时）
+    const pureFileName = effectiveNameType === 'origin' ? fileName.split('/').pop() : fileName;
+    const sanitizedFileName = effectiveNameType === 'origin'
+        ? pureFileName.replace(/[\\\\:*?"'<>|]/g, '_')  // 仅替换严格非法字符，保留空格等常用字符
+        : sanitizeFileName(fileName);
 
     const unique_index = Date.now() + Math.floor(Math.random() * 10000);
     let baseId = '';
 
     // 根据命名方式构建基础ID
-    if (nameType === 'index') {
+    if (effectiveNameType === 'index') {
         baseId = normalizedFolder ? `${normalizedFolder}/${unique_index}.${fileExt}` : `${unique_index}.${fileExt}`;
-    } else if (nameType === 'origin') {
-        baseId = normalizedFolder ? `${normalizedFolder}/${fileName}` : fileName;
-    } else if (nameType === 'short') {
+    } else if (effectiveNameType === 'origin') {
+        baseId = normalizedFolder ? `${normalizedFolder}/${sanitizedFileName}` : sanitizedFileName;
+    } else if (effectiveNameType === 'short') {
         // 对于短链接，直接在循环中生成不重复的ID
         while (true) {
             const shortId = generateShortId(8);
@@ -465,7 +473,7 @@ export async function buildUniqueFileId(context, fileName, fileType = 'applicati
             }
         }
     } else {
-        baseId = normalizedFolder ? `${normalizedFolder}/${unique_index}_${fileName}` : `${unique_index}_${fileName}`;
+        baseId = normalizedFolder ? `${normalizedFolder}/${unique_index}_${sanitizedFileName}` : `${unique_index}_${sanitizedFileName}`;
     }
 
     // 检查基础ID是否已存在
@@ -473,24 +481,25 @@ export async function buildUniqueFileId(context, fileName, fileType = 'applicati
         return baseId;
     }
 
+    // 如果已存在：
+    // - origin 模式（文件夹上传默认）：直接返回 baseId，覆盖替换原文件
+    // - 其他模式：在文件名后面加上递增编号生成新文件
+    if (effectiveNameType === 'origin') {
+        return baseId; // 替换模式：直接覆盖同名文件
+    }
+
     // 如果已存在，在文件名后面加上递增编号
     let counter = 1;
     while (true) {
         let duplicateId;
 
-        if (nameType === 'index') {
+        if (effectiveNameType === 'index') {
             const baseName = unique_index;
             duplicateId = normalizedFolder ?
                 `${normalizedFolder}/${baseName}(${counter}).${fileExt}` :
                 `${baseName}(${counter}).${fileExt}`;
-        } else if (nameType === 'origin') {
-            const nameWithoutExt = fileName.substring(0, fileName.lastIndexOf('.'));
-            const ext = fileName.substring(fileName.lastIndexOf('.'));
-            duplicateId = normalizedFolder ?
-                `${normalizedFolder}/${nameWithoutExt}(${counter})${ext}` :
-                `${nameWithoutExt}(${counter})${ext}`;
         } else {
-            const baseName = `${unique_index}_${fileName}`;
+            const baseName = `${unique_index}_${sanitizedFileName}`;
             const nameWithoutExt = baseName.substring(0, baseName.lastIndexOf('.'));
             const ext = baseName.substring(baseName.lastIndexOf('.'));
             duplicateId = normalizedFolder ?
