@@ -389,13 +389,13 @@ export async function purgeCDNCache(env, cdnUrl, url, normalizedFolder) {
 export async function endUpload(context, fileId, metadata) {
     const { env, url } = context;
 
+    // 优先更新文件索引（索引更新时会自动计算容量统计），确保后续立即刷新列表时能获取到新记录
+    await addFileToIndex(context, fileId, metadata);
+
     // 清除CDN缓存
     const cdnUrl = `https://${url.hostname}/file/${fileId}`;
     const normalizedFolder = sanitizeUploadFolder(url.searchParams.get('uploadFolder') || '');
     await purgeCDNCache(env, cdnUrl, url, normalizedFolder);
-
-    // 更新文件索引（索引更新时会自动计算容量统计）
-    await addFileToIndex(context, fileId, metadata);
 }
 
 // 从 request 中解析 ip 地址
