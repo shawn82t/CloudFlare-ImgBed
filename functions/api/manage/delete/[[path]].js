@@ -29,56 +29,95 @@ export async function onRequest(context) {
     const folder = url.searchParams.get('folder');
     if (folder === 'true') {
         try {
-            params.path = decodeURIComponent(params.path);
-            // 使用队列存储需要处理的文件夹
-            const folderQueue = [{
-                path: params.path.split(',').join('/')
-            }];
+            let folderPath = decodeURIComponent(Array.isArray(params.path) ? params.path.join('/') : (params.path || ''));
+            folderPath = folderPath.replace(/\.\./g, '_').replace(/\\/g, '/');
+            if (folderPath.startsWith('/')) folderPath = folderPath.substring(1);
+            if (folderPath && !folderPath.endsWith('/')) folderPath += '/';
 
+            if (!folderPath) {
+                return new Response(JSON.stringify({
+                    success: false,
+                    error: 'Cannot delete root directory'
+                }), {
+                    status: 400,
+                    headers: { 'Content-Type': 'application/json', ...corsHeaders }
+                });
+            }
+
+            const db = getDatabase(env);
             const deletedFiles = [];
             const failedFiles = [];
+            const allFilesToDelete = new Set();
 
-            while (folderQueue.length > 0) {
-                const currentFolder = folderQueue.shift();
-
-                let folderDir = currentFolder.path || '';
-                if (folderDir.startsWith('/')) folderDir = folderDir.substring(1);
-                if (folderDir && !folderDir.endsWith('/')) folderDir += '/';
-
-                // 直接调用内部 readIndex，无需发起网络 HTTP 子请求，避免 WAF 拦截及 Worker 子请求配额超限
+            // 1. 尝试从索引中读取该目录及其所有子孙文件（包含子目录递归）
+            try {
                 const listData = await readIndex(context, {
-                    directory: folderDir,
-                    count: -1
+                    directory: folderPath,
+                    count: -1,
+                    includeSubdirFiles: true
                 });
-
-                const files = listData.files || [];
-
-                // 处理当前文件夹下的所有文件
-                for (const file of files) {
-                    const fileId = file.id || file.name;
-                    const cdnUrl = `https://${url.hostname}/file/${fileId}`;
-
-                    const success = await deleteFile(env, fileId, cdnUrl, url);
-                    if (success) {
-                        deletedFiles.push(fileId);
-                    } else {
-                        failedFiles.push(fileId);
+                if (listData && Array.isArray(listData.files)) {
+                    for (const f of listData.files) {
+                        const fid = f.id || f.name;
+                        if (fid) allFilesToDelete.add(fid);
                     }
                 }
+            } catch (indexErr) {
+                console.warn('readIndex failed during folder delete, falling back to database scan:', indexErr);
+            }
 
-                // 将子文件夹添加到队列
-                const directories = listData.directories || [];
-                for (const dir of directories) {
-                    folderQueue.push({
-                        path: dir
+            // 2. 直接扫描底层数据库（KV / D1），彻底保证所有物理文件（包括未建索引的文件）都被找到
+            try {
+                let cursor = null;
+                while (true) {
+                    const listResp = await db.list({
+                        prefix: folderPath,
+                        limit: 1000,
+                        cursor: cursor
                     });
+                    if (listResp && Array.isArray(listResp.keys)) {
+                        for (const item of listResp.keys) {
+                            if (!item.name.startsWith('manage@') && !item.name.startsWith('chunk_')) {
+                                allFilesToDelete.add(item.name);
+                            }
+                        }
+                        cursor = listResp.cursor;
+                        if (!cursor) break;
+                    } else {
+                        break;
+                    }
+                }
+            } catch (dbErr) {
+                console.warn('Database scan failed during folder delete:', dbErr);
+            }
+
+            // 3. 逐个彻底物理删除所有文件（远端渠道、数据库、CDN）
+            for (const fileId of allFilesToDelete) {
+                const cdnUrl = `https://${url.hostname}/file/${fileId}`;
+                const success = await deleteFile(env, fileId, cdnUrl, url);
+                if (success) {
+                    deletedFiles.push(fileId);
+                } else {
+                    failedFiles.push(fileId);
                 }
             }
 
-            // 批量从索引中删除文件
-            if (deletedFiles.length > 0) {
-                waitUntil(batchRemoveFilesFromIndex(context, deletedFiles));
+            // 4. 清除数据库中可能存在的空目录占位键
+            try {
+                await db.delete(folderPath);
+                await db.delete(folderPath.replace(/\/+$/, ''));
+            } catch (e) {
+                // ignore
             }
+
+            // 5. 必须 await 从索引中批量清除已删除的文件，确保在响应返回前索引更新完成！
+            if (deletedFiles.length > 0) {
+                await batchRemoveFilesFromIndex(context, deletedFiles);
+            }
+
+            // 6. 清理 CDN 与 API 缓存
+            await purgeRandomFileListCache(url.origin, folderPath);
+            await purgePublicFileListCache(url.origin, folderPath);
 
             return new Response(JSON.stringify({
                 success: true,
@@ -102,7 +141,7 @@ export async function onRequest(context) {
     // 单个文件删除处理
     try {
         // 解码params.path
-        params.path = decodeURIComponent(params.path);
+        params.path = decodeURIComponent(Array.isArray(params.path) ? params.path.join('/') : params.path);
         const fileId = params.path.split(',').join('/');
         const cdnUrl = `https://${url.hostname}/file/${fileId}`;
 
@@ -110,8 +149,8 @@ export async function onRequest(context) {
         if (!success) {
             throw new Error('Delete file failed');
         } else {
-            // 从索引中删除文件
-            waitUntil(removeFileFromIndex(context, fileId));
+            // 必须 await 从索引中删除文件，确保索引状态与存储一致
+            await removeFileFromIndex(context, fileId);
         }
 
         return new Response(JSON.stringify({

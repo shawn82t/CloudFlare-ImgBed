@@ -534,8 +534,8 @@ export async function readIndex(context, options = {}) {
         if (directory) {
             const normalizedDir = directory.endsWith('/') ? directory : directory + '/';
             filteredFiles = filteredFiles.filter(file => {
-                const fileDir = file.metadata.Directory ? file.metadata.Directory : extractDirectory(file.id);
-                return fileDir.startsWith(normalizedDir) || file.metadata.Directory === directory;
+                const fileDir = getNormalizedFileDir(file);
+                return fileDir.startsWith(normalizedDir);
             });
         }
 
@@ -703,7 +703,7 @@ export async function readIndex(context, options = {}) {
 
         // 计算当前目录下的直接文件（不包含子目录文件）
         const directFiles = filteredFiles.filter(file => {
-            const fileDir = file.metadata.Directory ? file.metadata.Directory : extractDirectory(file.id);
+            const fileDir = getNormalizedFileDir(file);
             return fileDir === dirPrefix;
         });
         const directFileCount = directFiles.length;
@@ -722,7 +722,7 @@ export async function readIndex(context, options = {}) {
         // 提取目录信息
         const directories = new Set();
         filteredFiles.forEach(file => {
-            const fileDir = file.metadata.Directory ? file.metadata.Directory : extractDirectory(file.id);
+            const fileDir = getNormalizedFileDir(file);
             if (fileDir && fileDir.startsWith(dirPrefix)) {
                 const relativePath = fileDir.substring(dirPrefix.length);
                 const firstSlashIndex = relativePath.indexOf('/');
@@ -1706,6 +1706,21 @@ function extractDirectory(filePath) {
         return ''; // 根目录
     }
     return filePath.substring(0, lastSlashIndex + 1); // 包含最后的斜杠
+}
+
+/**
+ * 获取规范化的文件所在目录（确保格式为无前置斜杠、有后置斜杠，根目录返回空字符串）
+ * @param {Object} file - 文件对象或带有 metadata 和 id 的对象
+ * @returns {string} 规范化后的目录路径
+ */
+function getNormalizedFileDir(file) {
+    if (!file) return '';
+    let dir = (file.metadata && file.metadata.Directory) ? file.metadata.Directory : extractDirectory(file.id || file.name || '');
+    if (!dir) return '';
+    dir = dir.replace(/\\/g, '/');
+    if (dir.startsWith('/')) dir = dir.substring(1);
+    if (dir && !dir.endsWith('/')) dir += '/';
+    return dir;
 }
 
 /**

@@ -77,12 +77,12 @@ export async function onRequest(context) {
 
             // 批量从索引中删除文件，添加新文件
             if (processedFiles.length > 0) {
-                waitUntil(batchMoveFilesInIndex(context, processedFiles.map(file => {
+                await batchMoveFilesInIndex(context, processedFiles.map(file => {
                     return {
                         originalFileId: file.fileId,
                         newFileId: file.newFileId,
                     };
-                })));
+                }));
             }
 
             // 返回处理结果
@@ -103,7 +103,7 @@ export async function onRequest(context) {
     // 单个文件移动处理
     try {
         // 解码params.path
-        params.path = decodeURIComponent(params.path);
+        params.path = decodeURIComponent(Array.isArray(params.path) ? params.path.join('/') : params.path);
         const fileId = params.path.split(',').join('/');
         const fileKey = fileId.split('/').pop();
         const newFileId = dist === '' ? fileKey : `${dist}/${fileKey}`;
@@ -114,7 +114,7 @@ export async function onRequest(context) {
             throw new Error('Move file failed');
         } else {
             // 从索引中删除旧文件，并添加新文件
-            waitUntil(moveFileInIndex(context, fileId, newFileId));
+            await moveFileInIndex(context, fileId, newFileId);
         }
 
         return new Response(JSON.stringify({
