@@ -1,6 +1,6 @@
 import { S3Client, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { purgeCFCache, purgeRandomFileListCache, purgePublicFileListCache } from "../../../utils/purgeCache";
-import { removeFileFromIndex, batchRemoveFilesFromIndex } from "../../../utils/indexManager.js";
+import { readIndex, removeFileFromIndex, batchRemoveFilesFromIndex } from "../../../utils/indexManager.js";
 import { getDatabase } from '../../../utils/databaseAdapter.js';
 import { DiscordAPI } from '../../../utils/storage/discordAPI.js';
 import { HuggingFaceAPI } from '../../../utils/storage/huggingfaceAPI.js';
@@ -41,19 +41,21 @@ export async function onRequest(context) {
             while (folderQueue.length > 0) {
                 const currentFolder = folderQueue.shift();
 
-                // 获取指定目录下的所有文件
-                const listUrl = new URL(`${url.origin}/api/manage/list?count=-1&dir=${currentFolder.path}`);
-                const listRequest = new Request(listUrl, {
-                    headers: request.headers,
-                });
-                const listResponse = await fetch(listRequest);
-                const listData = await listResponse.json();
+                let folderDir = currentFolder.path || '';
+                if (folderDir.startsWith('/')) folderDir = folderDir.substring(1);
+                if (folderDir && !folderDir.endsWith('/')) folderDir += '/';
 
-                const files = listData.files;
+                // 直接调用内部 readIndex，无需发起网络 HTTP 子请求，避免 WAF 拦截及 Worker 子请求配额超限
+                const listData = await readIndex(context, {
+                    directory: folderDir,
+                    count: -1
+                });
+
+                const files = listData.files || [];
 
                 // 处理当前文件夹下的所有文件
                 for (const file of files) {
-                    const fileId = file.name;
+                    const fileId = file.id || file.name;
                     const cdnUrl = `https://${url.hostname}/file/${fileId}`;
 
                     const success = await deleteFile(env, fileId, cdnUrl, url);
@@ -65,7 +67,7 @@ export async function onRequest(context) {
                 }
 
                 // 将子文件夹添加到队列
-                const directories = listData.directories;
+                const directories = listData.directories || [];
                 for (const dir of directories) {
                     folderQueue.push({
                         path: dir

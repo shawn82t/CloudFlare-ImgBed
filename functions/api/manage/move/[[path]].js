@@ -1,6 +1,6 @@
 import { S3Client, CopyObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { purgeCFCache, purgeRandomFileListCache, purgePublicFileListCache } from "../../../utils/purgeCache";
-import { moveFileInIndex, batchMoveFilesInIndex } from "../../../utils/indexManager.js";
+import { readIndex, moveFileInIndex, batchMoveFilesInIndex } from "../../../utils/indexManager.js";
 import { getDatabase } from '../../../utils/databaseAdapter.js';
 import { sanitizeUploadFolder } from "../../../upload/uploadTools.js";
 import { WebDAVAPI } from "../../../utils/storage/webdavAPI.js";
@@ -37,21 +37,23 @@ export async function onRequest(context) {
                 const currentFolder = folderQueue.shift();
                 const curFolderName = currentFolder.path.split('/').pop();
 
-                // 获取指定目录下的所有文件
-                const listUrl = new URL(`${url.origin}/api/manage/list?count=-1&dir=${currentFolder.path}`);
-                const listRequest = new Request(listUrl, {
-                    headers: request.headers,
-                });
-                const listResponse = await fetch(listRequest);
-                const listData = await listResponse.json();
+                let folderDir = currentFolder.path || '';
+                if (folderDir.startsWith('/')) folderDir = folderDir.substring(1);
+                if (folderDir && !folderDir.endsWith('/')) folderDir += '/';
 
-                const files = listData.files;
+                // 直接调用内部 readIndex，无需发起网络 HTTP 子请求，避免 WAF 拦截及 Worker 子请求配额超限
+                const listData = await readIndex(context, {
+                    directory: folderDir,
+                    count: -1
+                });
+
+                const files = listData.files || [];
                 const folderDist = currentFolder.dist === '' ? curFolderName : `${currentFolder.dist}/${curFolderName}`;
 
                 // 处理当前文件夹下的所有文件
                 for (const file of files) {
-                    const fileId = file.name;
-                    const fileName = file.name.split('/').pop();
+                    const fileId = file.id || file.name;
+                    const fileName = fileId.split('/').pop();
                     const newFileId = `${folderDist}/${fileName}`;
                     const cdnUrl = `https://${url.hostname}/file/${fileId}`;
 
@@ -64,7 +66,7 @@ export async function onRequest(context) {
                 }
 
                 // 将子文件夹添加到队列
-                const directories = listData.directories;
+                const directories = listData.directories || [];
                 for (const dir of directories) {
                     folderQueue.push({
                         path: dir,

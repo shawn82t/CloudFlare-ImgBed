@@ -119,23 +119,25 @@ class KVAdapter {
         });
         const result = await this.list(listOptions);
         
-        // 转换格式以匹配D1Database的返回格式
-        const operations = [];
-        for (const item of result.keys) {
+        // 并发获取操作内容，避免串行 await 产生巨大延迟
+        const operations = await Promise.all((result.keys || []).map(async (item) => {
             const operationData = await this.get(item.name);
-            if (operationData) {
+            if (!operationData) return null;
+            try {
                 const operation = JSON.parse(operationData);
-                operations.push({
+                return {
                     id: item.name.replace('manage@index@operation_', ''),
                     type: operation.type,
                     timestamp: operation.timestamp,
                     data: operation.data,
                     processed: false // KV中没有这个字段，默认为false
-                });
+                };
+            } catch {
+                return null;
             }
-        }
+        }));
         
-        return operations;
+        return operations.filter(Boolean);
     }
 }
 
