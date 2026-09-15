@@ -82,7 +82,10 @@ export async function onRequest(context) {  // Contents of context object
     }
 
     const fileName = imgRecord.metadata?.FileName || fileId;
-    const encodedFileName = encodeURIComponent(fileName);
+    // FileName 可能包含目录路径（如 pg/pg.jar），下载文件名应只保留最后一段纯文件名，
+    // 避免路径分隔符被浏览器转成下划线（如 pg_pg.jar）
+    const pureFileName = fileName.split('/').pop() || fileName;
+    const encodedFileName = encodeURIComponent(pureFileName);
     const fileType = imgRecord.metadata?.FileType || null;
 
     // 检查文件可访问状态
