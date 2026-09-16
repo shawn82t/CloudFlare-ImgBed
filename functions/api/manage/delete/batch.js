@@ -1,4 +1,4 @@
-import { batchRemoveFilesFromIndex } from '../../../utils/indexManager.js';
+import { batchRemoveFilesFromIndex, mergeOperationsToIndex } from '../../../utils/indexManager.js';
 import { mapConcurrent, normalizeBatchFileIds } from '../../../utils/deleteBatch.js';
 import { deleteFile } from './[[path]].js';
 
@@ -37,7 +37,8 @@ export async function onRequest(context) {
         const deleted = results.filter((item) => item.success).map((item) => item.fileId);
         const failed = results.filter((item) => !item.success).map(({ fileId, error }) => ({ fileId, error }));
         if (deleted.length > 0) {
-            context.waitUntil(batchRemoveFilesFromIndex(context, deleted));
+            await batchRemoveFilesFromIndex(context, deleted);
+            await mergeOperationsToIndex(context);
         }
         return jsonResponse({ success: failed.length === 0, deleted, failed });
     } catch (error) {

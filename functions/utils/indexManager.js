@@ -197,6 +197,39 @@ export async function batchRemoveFilesFromIndex(context, fileIds) {
 }
 
 /**
+ * 彻底从索引中移除指定目录及其所有子文件
+ * @param {Object} context - 上下文对象
+ * @param {string} directoryPath - 目录路径（如 'lib' 或 'lib/'）
+ */
+export async function removeDirectoryFromIndex(context, directoryPath) {
+    try {
+        let cleanDir = (directoryPath || '').replace(/\\/g, '/');
+        if (cleanDir.startsWith('/')) cleanDir = cleanDir.replace(/^\/+/, '');
+        if (cleanDir && !cleanDir.endsWith('/')) cleanDir += '/';
+        if (!cleanDir) {
+            return { success: false, error: 'Cannot remove root directory' };
+        }
+
+        const operationId = await recordOperation(context, 'remove_directory', {
+            directory: cleanDir
+        });
+
+        console.log(`Remove directory operation recorded with ID: ${operationId}, dir: ${cleanDir}`);
+        return {
+            success: true,
+            operationId,
+            directory: cleanDir
+        };
+    } catch (error) {
+        console.error('Error recording remove directory operation:', error);
+        return {
+            success: false,
+            error: error.message
+        };
+    }
+}
+
+/**
  * 移动文件（修改文件ID）
  * @param {Object} context - 上下文对象，包含 env 和其他信息
  * @param {string} originalFileId - 原文件 ID
@@ -378,6 +411,10 @@ export async function mergeOperationsToIndex(context, options = {}) {
                     case 'batch_remove':
                         removedCount += applyBatchRemoveOperation(workingIndex, operation.data);
                         break;
+
+                    case 'remove_directory':
+                        removedCount += applyRemoveDirectoryOperation(workingIndex, operation.data);
+                        break;
                         
                     case 'batch_move':
                         movedCount += applyBatchMoveOperation(workingIndex, operation.data);
@@ -429,19 +466,30 @@ export async function mergeOperationsToIndex(context, options = {}) {
             await cleanupOperations(context, processedOperationIds);
         }
 
-        // 如果未处理完所有操作，调用 merge-operations API 递归处理
+        // 如果未处理完所有操作，异步调用 merge-operations API 递归处理
         if (!isALLOperations) {
             console.log('There are remaining operations, will process them in subsequent calls.');
 
-            const headers = new Headers(request.headers);
-            const originUrl = new URL(request.url);
-            const mergeUrl = `${originUrl.protocol}//${originUrl.host}/api/manage/list?action=merge-operations`;
-
-            await fetch(mergeUrl, { method: 'GET', headers });
+            try {
+                if (request && request.url) {
+                    const headers = new Headers(request.headers);
+                    const originUrl = new URL(request.url);
+                    const mergeUrl = `${originUrl.protocol}//${originUrl.host}/api/manage/list?action=merge-operations`;
+                    fetch(mergeUrl, { method: 'GET', headers }).catch(e => console.warn('Background merge call error:', e));
+                }
+            } catch (err) {
+                console.warn('Failed to dispatch background merge request:', err);
+            }
 
             return {
-                success: false,
-                error: 'There are remaining operations, will process them in subsequent calls.'
+                success: true,
+                hasRemaining: true,
+                processedOperations: operationsProcessed,
+                addedCount,
+                updatedCount,
+                removedCount,
+                movedCount,
+                totalFiles: workingIndex.totalCount
             };
         }
 
@@ -513,13 +561,24 @@ export async function readIndex(context, options = {}) {
         const fileTypeArr = Array.isArray(fileType) ? fileType : (fileType ? [fileType] : []);
         const channelNameArr = Array.isArray(channelName) ? channelName : (channelName ? [channelName] : []);
 
-        // 处理目录满足无头有尾的格式，根目录为空
-        const dirPrefix = directory === '' || directory.endsWith('/') ? directory : directory + '/';
+        // 统一规范化目录格式：去除所有前后多余斜杠，确保无前导斜杠，有且仅有一个尾斜杠（根目录严格为空字符串 ''）
+        let normalizedDirPrefix = (directory || '').replace(/\\/g, '/');
+        if (normalizedDirPrefix.startsWith('/')) {
+            normalizedDirPrefix = normalizedDirPrefix.replace(/^\/+/, '');
+        }
+        if (normalizedDirPrefix && !normalizedDirPrefix.endsWith('/')) {
+            normalizedDirPrefix += '/';
+        }
+        const dirPrefix = normalizedDirPrefix;
 
-        // 处理挂起的操作
-        const mergeResult = await mergeOperationsToIndex(context);
-        if (!mergeResult.success) {
-            throw new Error('Failed to merge operations: ' + mergeResult.error);
+        // 处理挂起的操作（容错处理，避免阻断只读查询）
+        try {
+            const mergeResult = await mergeOperationsToIndex(context);
+            if (!mergeResult.success) {
+                console.warn('mergeOperationsToIndex reported non-success:', mergeResult.error);
+            }
+        } catch (mergeErr) {
+            console.warn('mergeOperationsToIndex failed non-fatally in readIndex:', mergeErr);
         }
 
         // 获取当前索引
@@ -530,12 +589,11 @@ export async function readIndex(context, options = {}) {
 
         let filteredFiles = index.files;
 
-        // 目录过滤
-        if (directory) {
-            const normalizedDir = directory.endsWith('/') ? directory : directory + '/';
+        // 目录过滤（统一使用规范化后的 dirPrefix）
+        if (dirPrefix) {
             filteredFiles = filteredFiles.filter(file => {
                 const fileDir = getNormalizedFileDir(file);
-                return fileDir.startsWith(normalizedDir);
+                return fileDir.startsWith(dirPrefix);
             });
         }
 
@@ -1501,8 +1559,41 @@ function applyBatchRemoveOperation(index, data) {
     const fileIdSet = new Set(fileIds);
     const initialLength = index.files.length;
     
-    index.files = index.files.filter(file => !fileIdSet.has(file.id));
+    index.files = index.files.filter(file => {
+        const id = file.id || file.name;
+        if (fileIdSet.has(id)) return false;
+        // 兼容处理可能带前导斜杠或不带前导斜杠的比对
+        if (id && id.startsWith('/') && fileIdSet.has(id.substring(1))) return false;
+        if (id && !id.startsWith('/') && fileIdSet.has('/' + id)) return false;
+        return true;
+    });
     
+    return initialLength - index.files.length;
+}
+
+/**
+ * 应用目录删除操作（从索引中彻底清除指定目录下所有文件）
+ * @param {Object} index - 索引对象
+ * @param {Object} data - 操作数据
+ */
+function applyRemoveDirectoryOperation(index, data) {
+    let targetDir = (data.directory || '').replace(/\\/g, '/');
+    if (targetDir.startsWith('/')) targetDir = targetDir.replace(/^\/+/, '');
+    if (targetDir && !targetDir.endsWith('/')) targetDir += '/';
+    if (!targetDir) return 0;
+
+    const initialLength = index.files.length;
+    index.files = index.files.filter(file => {
+        const fileDir = getNormalizedFileDir(file);
+        const fileId = file.id || file.name || '';
+        const cleanId = fileId.startsWith('/') ? fileId.substring(1) : fileId;
+        // 若文件的规范化目录在该目录下，或文件ID属于该目录前缀，彻底剔除
+        if (fileDir.startsWith(targetDir) || cleanId.startsWith(targetDir)) {
+            return false;
+        }
+        return true;
+    });
+
     return initialLength - index.files.length;
 }
 

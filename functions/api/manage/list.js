@@ -53,14 +53,14 @@ export async function onRequest(context) {
 
     // 处理目录参数
     if (dir) {
-        // 路径安全处理：防止路径穿越
+        // 路径安全处理：防止路径穿越与重复斜杠
         dir = dir.replace(/\.\./g, '_').replace(/\\/g, '/').replace(/\/{2,}/g, '/');
-    }
-    if (dir.startsWith('/')) {
-        dir = dir.substring(1);
-    }
-    if (dir && !dir.endsWith('/')) {
-        dir += '/';
+        dir = dir.replace(/^\/+/, '');
+        if (dir && !dir.endsWith('/')) {
+            dir += '/';
+        }
+    } else {
+        dir = '';
     }
 
     try {

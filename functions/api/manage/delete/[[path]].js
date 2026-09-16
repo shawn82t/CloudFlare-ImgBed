@@ -1,6 +1,6 @@
 import { S3Client, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { purgeCFCache, purgeRandomFileListCache, purgePublicFileListCache } from "../../../utils/purgeCache";
-import { readIndex, removeFileFromIndex, batchRemoveFilesFromIndex } from "../../../utils/indexManager.js";
+import { readIndex, removeFileFromIndex, batchRemoveFilesFromIndex, removeDirectoryFromIndex, mergeOperationsToIndex } from "../../../utils/indexManager.js";
 import { getDatabase } from '../../../utils/databaseAdapter.js';
 import { DiscordAPI } from '../../../utils/storage/discordAPI.js';
 import { HuggingFaceAPI } from '../../../utils/storage/huggingfaceAPI.js';
@@ -110,10 +110,12 @@ export async function onRequest(context) {
                 // ignore
             }
 
-            // 5. 必须 await 从索引中批量清除已删除的文件，确保在响应返回前索引更新完成！
+            // 5. 彻底从索引中剔除该目录及子文件，并立即合并落盘，确保在响应返回前索引更新完成！
+            await removeDirectoryFromIndex(context, folderPath);
             if (deletedFiles.length > 0) {
                 await batchRemoveFilesFromIndex(context, deletedFiles);
             }
+            await mergeOperationsToIndex(context);
 
             // 6. 清理 CDN 与 API 缓存
             await purgeRandomFileListCache(url.origin, folderPath);
@@ -149,8 +151,9 @@ export async function onRequest(context) {
         if (!success) {
             throw new Error('Delete file failed');
         } else {
-            // 必须 await 从索引中删除文件，确保索引状态与存储一致
+            // 必须 await 从索引中删除文件，并立即合并落盘确保索引一致
             await removeFileFromIndex(context, fileId);
+            await mergeOperationsToIndex(context);
         }
 
         return new Response(JSON.stringify({
@@ -177,8 +180,8 @@ export async function deleteFile(env, fileId, cdnUrl, url) {
         const db = getDatabase(env);
         const img = await db.getWithMetadata(fileId);
 
-        // 如果文件记录不存在，直接返回成功（幂等删除）
-        if (!img) {
+        // 如果文件记录不存在（或KV返回空值），直接返回成功（幂等删除）
+        if (!img || (!img.value && !img.metadata)) {
             console.warn(`File ${fileId} not found in database, skipping delete`);
             return true;
         }
