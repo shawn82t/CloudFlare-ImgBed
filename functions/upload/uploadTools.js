@@ -479,14 +479,12 @@ export async function buildUniqueFileId(context, fileName, fileType = 'applicati
         return baseId;
     }
 
-    // 如果已存在：
-    // - origin 模式：直接返回 baseId，覆盖替换原文件
-    // - 其他模式（如 default 模式）：在原文件名后加上递增编号生成新文件，不带时间戳前缀
-    if (effectiveNameType === 'origin') {
-        return baseId; // 替换模式：直接覆盖同名文件
+    // 若遇同名文件则直接替换，不追加递增序号
+    if (effectiveNameType === 'origin' || effectiveNameType === 'default') {
+        return baseId; // 直接覆盖替换同名文件
     }
 
-    // 如果已存在，在文件名后面加上递增编号 (1), (2)...
+    // 仅针对 index 模式进行递增序号处理
     let counter = 1;
     while (true) {
         let duplicateId;
@@ -497,12 +495,7 @@ export async function buildUniqueFileId(context, fileName, fileType = 'applicati
                 `${normalizedFolder}/${baseName}(${counter}).${fileExt}` :
                 `${baseName}(${counter}).${fileExt}`;
         } else {
-            const dotIndex = sanitizedFileName.lastIndexOf('.');
-            const nameWithoutExt = dotIndex !== -1 ? sanitizedFileName.substring(0, dotIndex) : sanitizedFileName;
-            const ext = dotIndex !== -1 ? sanitizedFileName.substring(dotIndex) : '';
-            duplicateId = normalizedFolder ?
-                `${normalizedFolder}/${nameWithoutExt}(${counter})${ext}` :
-                `${nameWithoutExt}(${counter})${ext}`;
+            return baseId;
         }
 
         // 检查新ID是否已存在
