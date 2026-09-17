@@ -52,6 +52,7 @@ export async function onRequest(context) {  // Contents of context object
 
     const url = new URL(request.url);
     context.url = url;
+    context.isDownload = url.searchParams.has('download') || url.searchParams.get('dl') === '1';
 
     context.imageTransform = parseImageTransform(url, securityConfig.access);
     const imageTransformError = validateImageTransformRequest(request, context.imageTransform);
@@ -85,7 +86,9 @@ export async function onRequest(context) {  // Contents of context object
     // FileName 可能包含目录路径（如 pg/pg.jar），下载文件名应只保留最后一段纯文件名，
     // 避免路径分隔符被浏览器转成下划线（如 pg_pg.jar）
     const pureFileName = fileName.split('/').pop() || fileName;
-    const encodedFileName = encodeURIComponent(pureFileName);
+    // 剥离时间戳前缀（如 1726569123456_），确保拉取下载时文件名干净
+    const cleanFileName = pureFileName.replace(/^\d{10,}(?:_\d+)?_/, '');
+    const encodedFileName = encodeURIComponent(cleanFileName);
     const fileType = imgRecord.metadata?.FileType || null;
 
     // 检查文件可访问状态
@@ -156,7 +159,7 @@ export async function onRequest(context) {  // Contents of context object
             if (!response.ok) return response;
 
             const headers = new Headers(response.headers);
-            setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context));
+            setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context), context.isDownload);
             return await transformImageResponse(context, new Response(response.body, {
                 status: response.status,
                 statusText: response.statusText,
@@ -217,7 +220,7 @@ export async function onRequest(context) {  // Contents of context object
         }
 
         const headers = new Headers(response.headers);
-        setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context));
+        setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context), context.isDownload);
 
         const newRes = new Response(response.body, {
             status: response.status,
@@ -301,7 +304,7 @@ async function handleTelegramChunkedFile(context, imgRecord, encodedFileName, fi
 
     // 构建响应头
     const headers = new Headers();
-    setCommonHeaders(headers, encodedFileName, fileType, getChunkedFileCacheControl(context));
+    setCommonHeaders(headers, encodedFileName, fileType, getChunkedFileCacheControl(context), context.isDownload);
     headers.set('Content-Length', totalSize.toString());
 
     // 添加ETag支持
@@ -495,7 +498,7 @@ async function handleDiscordChunkedFile(context, imgRecord, encodedFileName, fil
 
     // 构建响应头
     const headers = new Headers();
-    setCommonHeaders(headers, encodedFileName, fileType, getChunkedFileCacheControl(context));
+    setCommonHeaders(headers, encodedFileName, fileType, getChunkedFileCacheControl(context), context.isDownload);
     headers.set('Content-Length', totalSize.toString());
 
     // 添加ETag支持
@@ -707,7 +710,7 @@ async function handleR2File(context, fileId, encodedFileName, fileType) {
 
         const headers = new Headers();
         object.writeHttpMetadata(headers);
-        setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context));
+        setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context), context.isDownload);
 
         // 处理HEAD请求
         if (request.method === 'HEAD') {
@@ -748,7 +751,7 @@ async function handleS3File(context, metadata, encodedFileName, fileType) {
             // 处理 HEAD 请求
             if (request.method === 'HEAD') {
                 const headers = new Headers();
-                setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context));
+                setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context), context.isDownload);
                 return handleHeadRequest(headers);
             }
 
@@ -775,7 +778,7 @@ async function handleS3File(context, metadata, encodedFileName, fileType) {
 
             // 构建响应头
             const headers = new Headers();
-            setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context));
+            setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context), context.isDownload);
 
             // 复制相关头部
             if (response.headers.get('Content-Length')) {
@@ -849,7 +852,7 @@ async function handleS3FileViaAPI(context, metadata, encodedFileName, fileType) 
 
         // 设置响应头
         const headers = new Headers();
-        setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context));
+        setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context), context.isDownload);
 
         // 设置Content-Length和Content-Range头
         if (response.ContentLength) {
@@ -904,7 +907,7 @@ async function handleDiscordFile(context, metadata, encodedFileName, fileType) {
         // 处理 HEAD 请求
         if (request.method === 'HEAD') {
             const headers = new Headers();
-            setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context));
+            setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context), context.isDownload);
             return handleHeadRequest(headers);
         }
 
@@ -926,7 +929,7 @@ async function handleDiscordFile(context, metadata, encodedFileName, fileType) {
 
         // 构建响应头
         const headers = new Headers();
-        setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context));
+        setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context), context.isDownload);
 
         // 复制相关头部
         if (response.headers.get('Content-Length')) {
@@ -970,7 +973,7 @@ async function handleHuggingFaceFile(context, metadata, encodedFileName, fileTyp
         // 处理 HEAD 请求
         if (request.method === 'HEAD') {
             const headers = new Headers();
-            setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context));
+            setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context), context.isDownload);
             if (fileSize) {
                 headers.set('Content-Length', fileSize.toString());
             }
@@ -1002,7 +1005,7 @@ async function handleHuggingFaceFile(context, metadata, encodedFileName, fileTyp
 
         // 构建响应头
         const headers = new Headers();
-        setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context));
+        setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context), context.isDownload);
 
         // 复制相关头部
         if (response.headers.get('Content-Length')) {
@@ -1038,7 +1041,7 @@ async function handleWebDAVFile(context, metadata, encodedFileName, fileType) {
         }
 
         const headers = new Headers();
-        setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context));
+        setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context), context.isDownload);
 
         const fetchHeaders = {};
         const range = request.headers.get('Range');

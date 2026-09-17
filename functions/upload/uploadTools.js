@@ -448,12 +448,9 @@ export async function buildUniqueFileId(context, fileName, fileType = 'applicati
     // 这样可以保持原始目录结构，方便文件管理和查找
     const effectiveNameType = normalizedFolder ? 'origin' : nameType;
 
-    // 处理文件名，移除特殊字符（origin模式下仅做基础安全处理，保留原文件名）
-    // origin模式下先提取纯文件名（防止传入的fileName包含路径，如分块上传时）
-    const pureFileName = effectiveNameType === 'origin' ? fileName.split('/').pop() : fileName;
-    const sanitizedFileName = effectiveNameType === 'origin'
-        ? pureFileName.replace(/[\\\\:*?"'<>|]/g, '_')  // 仅替换严格非法字符，保留空格等常用字符
-        : sanitizeFileName(fileName);
+    // 处理文件名，提取纯文件名并仅替换严格非法字符，保留原文件名
+    const pureFileName = fileName.split('/').pop();
+    const sanitizedFileName = pureFileName.replace(/[\\:*?"'<>|]/g, '_');
 
     const unique_index = Date.now() + Math.floor(Math.random() * 10000);
     let baseId = '';
@@ -473,7 +470,8 @@ export async function buildUniqueFileId(context, fileName, fileType = 'applicati
             }
         }
     } else {
-        baseId = normalizedFolder ? `${normalizedFolder}/${unique_index}_${sanitizedFileName}` : `${unique_index}_${sanitizedFileName}`;
+        // 默认模式（default）：保持原文件名，不加时间戳前缀；如遇同名在后文通过(1),(2)递增解决冲突
+        baseId = normalizedFolder ? `${normalizedFolder}/${sanitizedFileName}` : sanitizedFileName;
     }
 
     // 检查基础ID是否已存在
@@ -482,13 +480,13 @@ export async function buildUniqueFileId(context, fileName, fileType = 'applicati
     }
 
     // 如果已存在：
-    // - origin 模式（文件夹上传默认）：直接返回 baseId，覆盖替换原文件
-    // - 其他模式：在文件名后面加上递增编号生成新文件
+    // - origin 模式：直接返回 baseId，覆盖替换原文件
+    // - 其他模式（如 default 模式）：在原文件名后加上递增编号生成新文件，不带时间戳前缀
     if (effectiveNameType === 'origin') {
         return baseId; // 替换模式：直接覆盖同名文件
     }
 
-    // 如果已存在，在文件名后面加上递增编号
+    // 如果已存在，在文件名后面加上递增编号 (1), (2)...
     let counter = 1;
     while (true) {
         let duplicateId;
@@ -499,9 +497,9 @@ export async function buildUniqueFileId(context, fileName, fileType = 'applicati
                 `${normalizedFolder}/${baseName}(${counter}).${fileExt}` :
                 `${baseName}(${counter}).${fileExt}`;
         } else {
-            const baseName = `${unique_index}_${sanitizedFileName}`;
-            const nameWithoutExt = baseName.substring(0, baseName.lastIndexOf('.'));
-            const ext = baseName.substring(baseName.lastIndexOf('.'));
+            const dotIndex = sanitizedFileName.lastIndexOf('.');
+            const nameWithoutExt = dotIndex !== -1 ? sanitizedFileName.substring(0, dotIndex) : sanitizedFileName;
+            const ext = dotIndex !== -1 ? sanitizedFileName.substring(dotIndex) : '';
             duplicateId = normalizedFolder ?
                 `${normalizedFolder}/${nameWithoutExt}(${counter})${ext}` :
                 `${nameWithoutExt}(${counter})${ext}`;
