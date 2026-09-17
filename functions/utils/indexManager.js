@@ -379,6 +379,7 @@ export async function mergeOperationsToIndex(context, options = {}) {
         let movedCount = 0;
         let updatedCount = 0;
         const processedOperationIds = [];
+        const allSupersededFileIds = [];
 
         // 应用每个操作
         for (const operation of operations) {
@@ -388,6 +389,9 @@ export async function mergeOperationsToIndex(context, options = {}) {
                         const addResult = applyAddOperation(workingIndex, operation.data);
                         if (addResult.added) addedCount++;
                         if (addResult.updated) updatedCount++;
+                        if (addResult.supersededFileIds && addResult.supersededFileIds.length > 0) {
+                            allSupersededFileIds.push(...addResult.supersededFileIds);
+                        }
                         break;
                         
                     case 'remove':
@@ -406,6 +410,9 @@ export async function mergeOperationsToIndex(context, options = {}) {
                         const batchAddResult = applyBatchAddOperation(workingIndex, operation.data);
                         addedCount += batchAddResult.addedCount;
                         updatedCount += batchAddResult.updatedCount;
+                        if (batchAddResult.supersededFileIds && batchAddResult.supersededFileIds.length > 0) {
+                            allSupersededFileIds.push(...batchAddResult.supersededFileIds);
+                        }
                         break;
                         
                     case 'batch_remove':
@@ -456,6 +463,15 @@ export async function mergeOperationsToIndex(context, options = {}) {
                     success: false,
                     error: 'Failed to save index'
                 };
+            }
+
+            // 异步清理被覆盖替换的旧文件数据库键，防止历史残留
+            if (allSupersededFileIds.length > 0) {
+                const db = getDatabase(context.env);
+                const uniqueSuperseded = Array.from(new Set(allSupersededFileIds));
+                for (const oldId of uniqueSuperseded) {
+                    db.delete(oldId).catch(err => console.warn(`Failed to delete superseded file key ${oldId}:`, err));
+                }
             }
 
             console.log(`Index updated: ${addedCount} added, ${updatedCount} updated, ${removedCount} removed, ${movedCount} moved`);
@@ -746,6 +762,10 @@ export async function readIndex(context, options = {}) {
             });
         }
 
+        // 防御性同目录同名去重，确保返回给前端列表时绝无同名重复文件
+        const dedupResult = deduplicateFiles(filteredFiles);
+        filteredFiles = dedupResult.uniqueFiles;
+
         // 如果只需要总数
         if (countOnly) {
             return {
@@ -882,6 +902,15 @@ export async function rebuildIndex(context, progressCallback = null) {
 
         // 按时间戳倒序排序
         newIndex.files.sort((a, b) => b.metadata.TimeStamp - a.metadata.TimeStamp);
+
+        // 重建时对同目录同名文件去重，只保留最新的一条，废弃旧键异步删除
+        const rebuildDedup = deduplicateFiles(newIndex.files);
+        newIndex.files = rebuildDedup.uniqueFiles;
+        if (rebuildDedup.removedIds.length > 0) {
+            for (const oldId of rebuildDedup.removedIds) {
+                waitUntil(db.delete(oldId).catch(() => {}));
+            }
+        }
 
         newIndex.totalCount = newIndex.files.length;
 
@@ -1441,29 +1470,55 @@ async function getAllPendingOperations(context, lastOperationId = null) {
 }
 
 /**
- * 应用添加操作
+ * 应用添加操作（若遇同名文件则直接覆盖替换，并清理旧 ID 记录与多余重复项）
  * @param {Object} index - 索引对象
  * @param {Object} data - 操作数据
  */
 function applyAddOperation(index, data) {
     const { fileId, metadata } = data;
     
-    // 检查文件是否已存在
-    const existingIndex = index.files.findIndex(file => file.id === fileId);
-    
     const fileItem = {
         id: fileId,
         metadata: metadata || {}
     };
-    
-    if (existingIndex !== -1) {
-        // 更新现有文件
-        index.files[existingIndex] = fileItem;
-        return { added: false, updated: true };
+
+    const cleanNewId = String(fileId || '').replace(/\\/g, '/').replace(/^\/+/, '');
+    const supersededFileIds = [];
+
+    // 查找同一目录下所有同名旧条目
+    const matchingIndices = [];
+    for (let i = 0; i < index.files.length; i++) {
+        if (isSameLogicalFile(index.files[i], fileId, metadata)) {
+            matchingIndices.push(i);
+        }
+    }
+
+    if (matchingIndices.length > 0) {
+        // 发现同名文件：执行直接覆盖替换
+        for (const idx of matchingIndices) {
+            const oldId = index.files[idx].id;
+            const cleanOldId = String(oldId || '').replace(/\\/g, '/').replace(/^\/+/, '');
+            // 如果旧文件的 ID 与新文件不同（例如旧文件带时间戳），记录旧 ID 以备异步清理
+            if (cleanOldId && cleanOldId !== cleanNewId) {
+                supersededFileIds.push(oldId);
+            }
+        }
+
+        // 第一个匹配项直接更新为新文件
+        const firstIdx = matchingIndices[0];
+        index.files[firstIdx] = fileItem;
+
+        // 如果之前存在多个历史重复条目（如双胞胎），将多余项从索引中彻底剔除
+        if (matchingIndices.length > 1) {
+            const removeSet = new Set(matchingIndices.slice(1));
+            index.files = index.files.filter((_, idx) => !removeSet.has(idx));
+        }
+
+        return { added: false, updated: true, supersededFileIds };
     } else {
-        // 添加新文件
+        // 不存在同名文件：按时间戳倒序插入新文件
         insertFileInOrder(index.files, fileItem);
-        return { added: true, updated: false };
+        return { added: true, updated: false, supersededFileIds: [] };
     }
 }
 
@@ -1512,41 +1567,19 @@ function applyBatchAddOperation(index, data) {
     
     let addedCount = 0;
     let updatedCount = 0;
-    
-    // 创建现有文件ID的映射以提高查找效率
-    const existingFilesMap = new Map();
-    index.files.forEach((file, idx) => {
-        existingFilesMap.set(file.id, idx);
-    });
-    
+    const supersededFileIds = [];
+
     for (const fileData of files) {
         const { fileId, metadata } = fileData;
-        const fileItem = {
-            id: fileId,
-            metadata: metadata || {}
-        };
-        
-        const existingIndex = existingFilesMap.get(fileId);
-        
-        if (existingIndex !== undefined) {
-            if (!skipExisting) {
-                // 更新现有文件
-                index.files[existingIndex] = fileItem;
-                updatedCount++;
-            }
-        } else {
-            // 添加新文件
-            insertFileInOrder(index.files, fileItem);
-            // 更新映射
-            index.files.forEach((file, idx) => {
-                existingFilesMap.set(file.id, idx);
-            });
-            
-            addedCount++;
+        const addResult = applyAddOperation(index, { fileId, metadata });
+        if (addResult.added) addedCount++;
+        if (addResult.updated) updatedCount++;
+        if (addResult.supersededFileIds && addResult.supersededFileIds.length > 0) {
+            supersededFileIds.push(...addResult.supersededFileIds);
         }
     }
     
-    return { addedCount, updatedCount };
+    return { addedCount, updatedCount, supersededFileIds };
 }
 
 /**
@@ -1813,6 +1846,94 @@ function getNormalizedFileDir(file) {
     if (dir && !dir.endsWith('/')) dir += '/';
     return dir;
 }
+
+/**
+ * 从文件名或ID中提取纯文件名（剥离目录路径以及可能存在的时间戳前缀）
+ * @param {string} str - 文件名或文件ID
+ * @returns {string} 纯文件名
+ */
+function getPureFileName(str) {
+    if (!str) return '';
+    const nameOnly = String(str).replace(/\\/g, '/').split('/').pop() || '';
+    // 剥离时间戳前缀，例如 1726589999123_abc.jpg -> abc.jpg 或 1726589999123_456_abc.jpg -> abc.jpg
+    return nameOnly.replace(/^\d{10,}(?:_\d+)?_/, '');
+}
+
+/**
+ * 判断两个文件记录是否属于同一个逻辑同名文件（同目录且纯文件名相同）
+ * @param {Object} fileA - 现有文件对象 { id, metadata }
+ * @param {string} targetId - 目标文件ID
+ * @param {Object} targetMetadata - 目标文件元数据
+ * @returns {boolean} 是否属于同名文件
+ */
+function isSameLogicalFile(fileA, targetId, targetMetadata = {}) {
+    if (!fileA) return false;
+
+    // 1. 精确 ID 匹配（兼容可能的前导斜杠差异）
+    const idA = String(fileA.id || fileA.name || '').replace(/\\/g, '/').replace(/^\/+/, '');
+    const idB = String(targetId || '').replace(/\\/g, '/').replace(/^\/+/, '');
+    if (idA && idB && idA === idB) {
+        return true;
+    }
+
+    // 2. 目录比对：必须在同一个目录下
+    const dirA = getNormalizedFileDir(fileA);
+    const targetDirRaw = targetMetadata?.Directory || extractDirectory(idB);
+    let dirB = (targetDirRaw || '').replace(/\\/g, '/');
+    if (dirB.startsWith('/')) dirB = dirB.substring(1);
+    if (dirB && !dirB.endsWith('/')) dirB += '/';
+
+    if (dirA !== dirB) {
+        return false; // 不在同一目录，绝对不是同名文件
+    }
+
+    // 3. 文件名比对：同目录下比对纯文件名（兼容历史时间戳前缀）
+    const nameA = fileA.metadata?.FileName || idA.split('/').pop() || '';
+    const nameB = targetMetadata?.FileName || idB.split('/').pop() || '';
+
+    // 原文件名直接相等
+    if (nameA && nameB && nameA === nameB) {
+        return true;
+    }
+
+    // 剥离时间戳前缀后纯文件名相等
+    const pureA = getPureFileName(nameA);
+    const pureB = getPureFileName(nameB);
+    return Boolean(pureA && pureB && pureA === pureB);
+}
+
+/**
+ * 对文件列表按同目录同名进行去重（优先保留已排序中前面/更新的记录）
+ * @param {Array} fileList - 文件列表
+ * @returns {{ uniqueFiles: Array, removedIds: Array }} 去重后的文件列表和被剔除的旧ID列表
+ */
+function deduplicateFiles(fileList) {
+    if (!Array.isArray(fileList) || fileList.length === 0) {
+        return { uniqueFiles: [], removedIds: [] };
+    }
+    const seenMap = new Map();
+    const uniqueFiles = [];
+    const removedIds = [];
+
+    for (const file of fileList) {
+        const dir = getNormalizedFileDir(file);
+        const fileName = file.metadata?.FileName || (file.id || file.name || '').split('/').pop() || '';
+        const pureName = getPureFileName(fileName);
+        const key = `${dir}:${pureName}`;
+
+        if (!seenMap.has(key)) {
+            seenMap.set(key, true);
+            uniqueFiles.push(file);
+        } else {
+            const oldId = file.id || file.name;
+            if (oldId) {
+                removedIds.push(oldId);
+            }
+        }
+    }
+    return { uniqueFiles, removedIds };
+}
+
 
 /**
  * 将扁平目录路径列表转换为嵌套树结构

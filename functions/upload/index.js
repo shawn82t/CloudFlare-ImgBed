@@ -160,9 +160,9 @@ async function processFileUpload(context, formdata = null) {
         uploadFolder = fileName.split('/').slice(0, -1).join('/');
         // 对从文件名中提取的路径也进行安全处理
         uploadFolder = sanitizeUploadFolder(uploadFolder);
-        // 从文件名中去除路径信息，只保留文件名部分
-        fileName = fileName.split('/').pop();
     }
+    // 无论上传文件夹是否为空，必须始终提取纯文件名，防止路径叠加或重复
+    fileName = fileName.split('/').pop();
     // uploadFolder 已经过 sanitizeUploadFolder 处理，直接使用
     const normalizedFolder = uploadFolder;
 
