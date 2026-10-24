@@ -577,15 +577,9 @@ export async function readIndex(context, options = {}) {
         const fileTypeArr = Array.isArray(fileType) ? fileType : (fileType ? [fileType] : []);
         const channelNameArr = Array.isArray(channelName) ? channelName : (channelName ? [channelName] : []);
 
-        // 统一规范化目录格式：去除所有前后多余斜杠，确保无前导斜杠，有且仅有一个尾斜杠（根目录严格为空字符串 ''）
-        let normalizedDirPrefix = (directory || '').replace(/\\/g, '/');
-        if (normalizedDirPrefix.startsWith('/')) {
-            normalizedDirPrefix = normalizedDirPrefix.replace(/^\/+/, '');
-        }
-        if (normalizedDirPrefix && !normalizedDirPrefix.endsWith('/')) {
-            normalizedDirPrefix += '/';
-        }
-        const dirPrefix = normalizedDirPrefix;
+        // 统一规范化目录格式：彻底容错首尾斜杠与多层嵌套（根目录严格为空字符串 ''）
+        const cleanDirPrefix = (directory || '').replace(/\\/g, '/').replace(/^\/+/g, '').replace(/\/+$/g, '');
+        const dirPrefix = cleanDirPrefix ? cleanDirPrefix + '/' : '';
 
         // 处理挂起的操作（容错处理，避免阻断只读查询）
         try {
@@ -605,11 +599,12 @@ export async function readIndex(context, options = {}) {
 
         let filteredFiles = index.files;
 
-        // 目录过滤（统一使用规范化后的 dirPrefix）
-        if (dirPrefix) {
+        // 目录过滤（无缝兼容带/不带尾斜杠及多层子路径）
+        if (cleanDirPrefix) {
             filteredFiles = filteredFiles.filter(file => {
                 const fileDir = getNormalizedFileDir(file);
-                return fileDir.startsWith(dirPrefix);
+                const cleanFileDir = fileDir.replace(/^\/+/g, '').replace(/\/+$/g, '');
+                return cleanFileDir === cleanDirPrefix || cleanFileDir.startsWith(cleanDirPrefix + '/');
             });
         }
 
@@ -782,7 +777,8 @@ export async function readIndex(context, options = {}) {
         // 计算当前目录下的直接文件（不包含子目录文件）
         const directFiles = filteredFiles.filter(file => {
             const fileDir = getNormalizedFileDir(file);
-            return fileDir === dirPrefix;
+            const cleanFileDir = fileDir.replace(/^\/+/g, '').replace(/\/+$/g, '');
+            return cleanFileDir === cleanDirPrefix;
         });
         const directFileCount = directFiles.length;
 
@@ -797,16 +793,21 @@ export async function readIndex(context, options = {}) {
             resultFiles = resultFiles.slice(startIndex, endIndex);
         }
 
-        // 提取目录信息
+        // 提取目录信息（严格提取直接下级子目录）
         const directories = new Set();
         filteredFiles.forEach(file => {
             const fileDir = getNormalizedFileDir(file);
-            if (fileDir && fileDir.startsWith(dirPrefix)) {
-                const relativePath = fileDir.substring(dirPrefix.length);
-                const firstSlashIndex = relativePath.indexOf('/');
-                if (firstSlashIndex !== -1) {
-                    const subDir = dirPrefix + relativePath.substring(0, firstSlashIndex);
-                    directories.add(subDir);
+            const cleanFileDir = fileDir.replace(/^\/+/g, '').replace(/\/+$/g, '');
+            if (cleanDirPrefix === '') {
+                if (cleanFileDir) {
+                    const topDir = cleanFileDir.split('/')[0];
+                    if (topDir) directories.add(topDir);
+                }
+            } else if (cleanFileDir.startsWith(cleanDirPrefix + '/')) {
+                const relative = cleanFileDir.slice(cleanDirPrefix.length + 1);
+                const subName = relative.split('/')[0];
+                if (subName) {
+                    directories.add(cleanDirPrefix + '/' + subName);
                 }
             }
         });

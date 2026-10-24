@@ -250,16 +250,31 @@ async function getAllFileRecords(env, dir) {
             await new Promise(resolve => setTimeout(resolve, 10));
         }
 
-        // 提取目录信息
+        // 提取目录信息（鲁棒兼容 metadata.Directory 与 name 路径）
+        const cleanDir = dir ? dir.replace(/\\/g, '/').replace(/^\/+/g, '').replace(/\/+$/g, '') : '';
         const directories = new Set();
         const filteredRecords = [];
         allRecords.forEach(item => {
-            const subDir = item.name.substring(dir.length);
-            const firstSlashIndex = subDir.indexOf('/');
-            if (firstSlashIndex !== -1) {
-                directories.add(dir + subDir.substring(0, firstSlashIndex));
+            const rawDir = item.metadata?.Directory || (item.name && item.name.includes('/') ? item.name.substring(0, item.name.lastIndexOf('/')) : '');
+            const cleanItemDir = (rawDir || '').replace(/\\/g, '/').replace(/^\/+/g, '').replace(/\/+$/g, '');
+            
+            if (cleanDir === '') {
+                if (cleanItemDir === '') {
+                    filteredRecords.push(item);
+                } else {
+                    const topDir = cleanItemDir.split('/')[0];
+                    if (topDir) directories.add(topDir);
+                }
             } else {
-                filteredRecords.push(item);
+                if (cleanItemDir === cleanDir) {
+                    filteredRecords.push(item);
+                } else if (cleanItemDir.startsWith(cleanDir + '/')) {
+                    const relative = cleanItemDir.slice(cleanDir.length + 1);
+                    const subName = relative.split('/')[0];
+                    if (subName) {
+                        directories.add(cleanDir + '/' + subName);
+                    }
+                }
             }
         });
 
